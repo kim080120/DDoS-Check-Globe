@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import { MapContainer, TileLayer, CircleMarker, Polyline, Tooltip } from 'react-leaflet';
+import Globe from 'react-globe.gl';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 
@@ -26,91 +26,77 @@ function SearchBar({ targetIp, onSubmit }) {
   );
 }
 
-function MapView({ events }) {
-  const arcs = useMemo(
-    () =>
-      events
-        .filter((event) => event.source_geo.latitude && event.target_geo.latitude)
-        .map((event) => ({
-          id: `${event.source_ip}-${event.timestamp}`,
-          from: [event.source_geo.latitude, event.source_geo.longitude],
-          to: [event.target_geo.latitude, event.target_geo.longitude],
-          payload: event,
-        })),
-    [events]
-  );
-
-  const sources = useMemo(
-    () =>
-      events.filter((event) => event.source_geo.latitude && event.source_geo.longitude),
-    [events]
-  );
-
-  const targets = useMemo(
-    () =>
-      events.filter((event) => event.target_geo.latitude && event.target_geo.longitude),
-    [events]
-  );
-
-  return (
-    <MapContainer className="map" center={[20, 0]} zoom={2} scrollWheelZoom>
-      <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-      {arcs.map((arc) => (
-        <Polyline key={arc.id} positions={[arc.from, arc.to]} pathOptions={{ color: '#ff4757' }}>
-          <Tooltip>
-            <div>
-              <div><strong>Source:</strong> {arc.payload.source_ip}</div>
-              <div><strong>Target:</strong> {arc.payload.target_ip}</div>
-              <div><strong>Bytes:</strong> {arc.payload.bytes_sent}</div>
-              {arc.payload.attack_type && (
-                <div><strong>Type:</strong> {arc.payload.attack_type}</div>
-              )}
-              <div><strong>Seen:</strong> {new Date(arc.payload.timestamp).toLocaleString()}</div>
-            </div>
-          </Tooltip>
-        </Polyline>
-      ))}
-      {sources.map((event, index) => (
-        <CircleMarker
-          key={`source-${event.source_ip}-${index}`}
-          center={[event.source_geo.latitude, event.source_geo.longitude]}
-          radius={5}
-          pathOptions={{ color: '#1e90ff', fillColor: '#1e90ff' }}
-        >
-          <Tooltip direction="top">
-            <div>
-              <div><strong>Source:</strong> {event.source_ip}</div>
-              {event.source_geo.city && <div>{event.source_geo.city}</div>}
-              {event.source_geo.country && <div>{event.source_geo.country}</div>}
-            </div>
-          </Tooltip>
-        </CircleMarker>
-      ))}
-      {targets.map((event, index) => (
-        <CircleMarker
-          key={`target-${event.target_ip}-${index}`}
-          center={[event.target_geo.latitude, event.target_geo.longitude]}
-          radius={6}
-          pathOptions={{ color: '#ffa502', fillColor: '#ffa502' }}
-        >
-          <Tooltip direction="top">
-            <div>
-              <div><strong>Target:</strong> {event.target_ip}</div>
-              {event.target_geo.city && <div>{event.target_geo.city}</div>}
-              {event.target_geo.country && <div>{event.target_geo.country}</div>}
-            </div>
-          </Tooltip>
-        </CircleMarker>
-      ))}
-    </MapContainer>
-  );
-}
-
 export default function App() {
   const [events, setEvents] = useState([]);
   const [targetIp, setTargetIp] = useState('');
   const [windowMinutes, setWindowMinutes] = useState(10);
 
+  // 백엔드에서 받은 이벤트 → 3D 글로브용 데이터로 변환
+
+  const arcsData = useMemo(
+    () =>
+      events
+        .filter(
+          (event) =>
+            event.source_geo?.latitude != null &&
+            event.source_geo?.longitude != null &&
+            event.target_geo?.latitude != null &&
+            event.target_geo?.longitude != null
+        )
+        .map((event) => ({
+          ...event,
+          startLat: event.source_geo.latitude,
+          startLng: event.source_geo.longitude,
+          endLat: event.target_geo.latitude,
+          endLng: event.target_geo.longitude,
+        })),
+    [events]
+  );
+
+  const sourcePoints = useMemo(
+    () =>
+      events
+        .filter(
+          (event) =>
+            event.source_geo?.latitude != null &&
+            event.source_geo?.longitude != null
+        )
+        .map((event) => ({
+          kind: 'source',
+          lat: event.source_geo.latitude,
+          lng: event.source_geo.longitude,
+          ip: event.source_ip,
+          city: event.source_geo.city,
+          country: event.source_geo.country,
+        })),
+    [events]
+  );
+
+  const targetPoints = useMemo(
+    () =>
+      events
+        .filter(
+          (event) =>
+            event.target_geo?.latitude != null &&
+            event.target_geo?.longitude != null
+        )
+        .map((event) => ({
+          kind: 'target',
+          lat: event.target_geo.latitude,
+          lng: event.target_geo.longitude,
+          ip: event.target_ip,
+          city: event.target_geo.city,
+          country: event.target_geo.country,
+        })),
+    [events]
+  );
+
+  const pointsData = useMemo(
+    () => [...sourcePoints, ...targetPoints],
+    [sourcePoints, targetPoints]
+  );
+
+  // 백엔드와 연동 (REST + WebSocket)
   useEffect(() => {
     if (!targetIp) return;
 
@@ -127,8 +113,13 @@ export default function App() {
 
     fetchRecent();
 
+    const isHttps = API_BASE.startsWith('https');
+    const wsBase = API_BASE.replace(/^https?/, isHttps ? 'wss' : 'ws');
+
     const ws = new WebSocket(
-      `${API_BASE.replace('http', 'ws')}/ws/events?target_ip=${encodeURIComponent(targetIp)}&window_minutes=${windowMinutes}`
+      `${wsBase}/ws/events?target_ip=${encodeURIComponent(
+        targetIp
+      )}&window_minutes=${windowMinutes}`
     );
 
     ws.onmessage = (event) => {
@@ -160,7 +151,60 @@ export default function App() {
           />
         </label>
       </div>
-      <MapView events={events} />
+
+      <div className="globe-wrapper">
+        <Globe
+          // 구글어스처럼 마우스로 드래그해서 회전 / 줌 가능
+          globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
+          bumpImageUrl="//unpkg.com/three-globe/example/img/earth-topology.png"
+          backgroundColor="#020617"
+          width={window.innerWidth}
+          height={window.innerHeight}
+          // 아크(공격 라인)
+          arcsData={arcsData}
+          arcStartLat="startLat"
+          arcStartLng="startLng"
+          arcEndLat="endLat"
+          arcEndLng="endLng"
+          arcColor={() => ['#1e90ff', '#ff4757']}
+          arcDashLength={0.5}
+          arcDashGap={0.4}
+          arcDashAnimateTime={1200}
+          arcLabel={(d) => `
+            <div>
+              <div><strong>Source:</strong> ${d.source_ip}</div>
+              <div><strong>Target:</strong> ${d.target_ip}</div>
+              <div><strong>Bytes:</strong> ${d.bytes_sent}</div>
+              ${
+                d.attack_type
+                  ? `<div><strong>Type:</strong> ${d.attack_type}</div>`
+                  : ''
+              }
+              <div><strong>Seen:</strong> ${new Date(
+                d.timestamp
+              ).toLocaleString()}</div>
+            </div>
+          `}
+          // 소스/타깃 포인트
+          pointsData={pointsData}
+          pointLat="lat"
+          pointLng="lng"
+          pointAltitude={0.05}
+          pointRadius={0.2}
+          pointColor={(p) => (p.kind === 'source' ? '#1e90ff' : '#ffa502')}
+          pointLabel={(p) =>
+            `<div>
+              <div><strong>${p.kind === 'source' ? 'Source' : 'Target'}</strong></div>
+              <div>${p.ip}</div>
+              ${
+                p.city || p.country
+                  ? `<div>${[p.city, p.country].filter(Boolean).join(', ')}</div>`
+                  : ''
+              }
+            </div>`
+          }
+        />
+      </div>
     </div>
   );
 }
