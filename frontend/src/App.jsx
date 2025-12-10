@@ -31,6 +31,17 @@ export default function App() {
   const [targetIp, setTargetIp] = useState('');
   const [windowMinutes, setWindowMinutes] = useState(10);
 
+  const handleWindowMinutesChange = (value) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+    const clamped = Math.min(120, Math.max(1, parsed));
+    setWindowMinutes(clamped);
+  };
+
+  const handleTargetSubmit = (nextTarget) => {
+    setTargetIp(nextTarget);
+  };
+
   // 백엔드에서 받은 이벤트 → 3D 글로브용 데이터로 변환
 
   const arcsData = useMemo(
@@ -98,14 +109,22 @@ export default function App() {
 
   // 백엔드와 연동 (REST + WebSocket)
   useEffect(() => {
-    if (!targetIp) return;
+    if (!targetIp) {
+      setEvents([]);
+      return;
+    }
+
+    let unsubscribed = false;
+    setEvents([]);
 
     const fetchRecent = async () => {
       try {
         const response = await axios.get(`${API_BASE}/events`, {
           params: { target_ip: targetIp, window_minutes: windowMinutes },
         });
-        setEvents(response.data);
+        if (!unsubscribed) {
+          setEvents(response.data);
+        }
       } catch (error) {
         console.error('Failed to fetch events', error);
       }
@@ -124,7 +143,9 @@ export default function App() {
 
     ws.onmessage = (event) => {
       const payload = JSON.parse(event.data);
-      setEvents((current) => [payload, ...current].slice(0, 200));
+      if (!unsubscribed) {
+        setEvents((current) => [payload, ...current].slice(0, 200));
+      }
     };
 
     ws.onerror = (error) => {
@@ -132,6 +153,7 @@ export default function App() {
     };
 
     return () => {
+      unsubscribed = true;
       ws.close();
     };
   }, [targetIp, windowMinutes]);
@@ -139,7 +161,7 @@ export default function App() {
   return (
     <div className="app">
       <div className="controls">
-        <SearchBar targetIp={targetIp} onSubmit={setTargetIp} />
+        <SearchBar targetIp={targetIp} onSubmit={handleTargetSubmit} />
         <label className="window-input">
           <span>Minutes</span>
           <input
@@ -147,7 +169,7 @@ export default function App() {
             value={windowMinutes}
             min={1}
             max={120}
-            onChange={(event) => setWindowMinutes(Number(event.target.value))}
+            onChange={(event) => handleWindowMinutesChange(event.target.value)}
           />
         </label>
       </div>
