@@ -1,210 +1,247 @@
-import { useEffect, useMemo, useState } from 'react';
-import axios from 'axios';
-import Globe from 'react-globe.gl';
+import React, { useEffect, useRef } from 'react';
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 
-function SearchBar({ targetIp, onSubmit }) {
-  const [value, setValue] = useState(targetIp);
+const EARTH_DAY =
+  'https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg';
+const EARTH_NIGHT =
+  'https://unpkg.com/three-globe/example/img/earth-night.jpg';
+const EARTH_BORDER =
+  'https://unpkg.com/three-globe/example/img/earth-dark.jpg';
+const STARFIELD =
+  'https://unpkg.com/three-globe/example/img/night-sky.png';
 
-  return (
-    <form
-      className="search-bar"
-      onSubmit={(event) => {
-        event.preventDefault();
-        onSubmit(value.trim());
-      }}
-    >
-      <input
-        type="text"
-        placeholder="Target IP"
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-      />
-      <button type="submit">Track</button>
-    </form>
-  );
-}
+const AUTO_ROT_SPEED = 0.03;
 
 export default function App() {
-  const [events, setEvents] = useState([]);
-  const [targetIp, setTargetIp] = useState('');
-  const [windowMinutes, setWindowMinutes] = useState(10);
+  const mountRef = useRef(null);
 
-  // 백엔드에서 받은 이벤트 → 3D 글로브용 데이터로 변환
-
-  const arcsData = useMemo(
-    () =>
-      events
-        .filter(
-          (event) =>
-            event.source_geo?.latitude != null &&
-            event.source_geo?.longitude != null &&
-            event.target_geo?.latitude != null &&
-            event.target_geo?.longitude != null
-        )
-        .map((event) => ({
-          ...event,
-          startLat: event.source_geo.latitude,
-          startLng: event.source_geo.longitude,
-          endLat: event.target_geo.latitude,
-          endLng: event.target_geo.longitude,
-        })),
-    [events]
-  );
-
-  const sourcePoints = useMemo(
-    () =>
-      events
-        .filter(
-          (event) =>
-            event.source_geo?.latitude != null &&
-            event.source_geo?.longitude != null
-        )
-        .map((event) => ({
-          kind: 'source',
-          lat: event.source_geo.latitude,
-          lng: event.source_geo.longitude,
-          ip: event.source_ip,
-          city: event.source_geo.city,
-          country: event.source_geo.country,
-        })),
-    [events]
-  );
-
-  const targetPoints = useMemo(
-    () =>
-      events
-        .filter(
-          (event) =>
-            event.target_geo?.latitude != null &&
-            event.target_geo?.longitude != null
-        )
-        .map((event) => ({
-          kind: 'target',
-          lat: event.target_geo.latitude,
-          lng: event.target_geo.longitude,
-          ip: event.target_ip,
-          city: event.target_geo.city,
-          country: event.target_geo.country,
-        })),
-    [events]
-  );
-
-  const pointsData = useMemo(
-    () => [...sourcePoints, ...targetPoints],
-    [sourcePoints, targetPoints]
-  );
-
-  // 백엔드와 연동 (REST + WebSocket)
   useEffect(() => {
-    if (!targetIp) return;
+    const container = mountRef.current;
+    if (!container) return;
 
-    const fetchRecent = async () => {
-      try {
-        const response = await axios.get(`${API_BASE}/events`, {
-          params: { target_ip: targetIp, window_minutes: windowMinutes },
-        });
-        setEvents(response.data);
-      } catch (error) {
-        console.error('Failed to fetch events', error);
-      }
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const camera = new THREE.PerspectiveCamera(
+      45,
+      container.clientWidth / container.clientHeight,
+      0.1,
+      1000
+    );
+    camera.position.set(0, 0, 4);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    container.appendChild(renderer.domElement);
+
+    
+    const ambient = new THREE.AmbientLight(0xffffff, 0.45);
+    scene.add(ambient);
+
+    
+    const sunDir = new THREE.Vector3(1.0, 0.4, 0.8).normalize();
+
+    const globeGroup = new THREE.Group();
+    scene.add(globeGroup);
+
+    const radius = 1;
+    const geo = new THREE.SphereGeometry(radius, 128, 128);
+
+    const uniforms = {
+      dayTexture: { value: null },
+      nightTexture: { value: null },
+      borderTexture: { value: null },
+      sunDirection: { value: sunDir }
     };
 
-    fetchRecent();
+    const material = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: `
+        varying vec2 vUv;
+        varying vec3 vNormalWorld;
 
-    const isHttps = API_BASE.startsWith('https');
-    const wsBase = API_BASE.replace(/^https?/, isHttps ? 'wss' : 'ws');
+        void main() {
+          vUv = uv;
+          vNormalWorld = normalize(mat3(modelMatrix) * normal);
+          gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D dayTexture;
+        uniform sampler2D nightTexture;
+        uniform sampler2D borderTexture;
+        uniform vec3 sunDirection;
 
-    const ws = new WebSocket(
-      `${wsBase}/ws/events?target_ip=${encodeURIComponent(
-        targetIp
-      )}&window_minutes=${windowMinutes}`
+        varying vec2 vUv;
+        varying vec3 vNormalWorld;
+
+        vec3 saturateColor(vec3 c, float sat) {
+          float l = dot(c, vec3(0.299, 0.587, 0.114));
+          return mix(vec3(l), c, sat);
+        }
+
+        void main() {
+          vec3 n = normalize(vNormalWorld);
+          vec3 l = normalize(sunDirection);
+
+          float ndotl = dot(n, l);
+
+          // dayFactor: 1 = 낮, 0 = 밤
+          float dayFactor   = smoothstep(-0.05, 0.45, ndotl);
+          float nightFactor = 1.0 - dayFactor;
+
+          vec3 dayColor   = texture2D(dayTexture,   vUv).rgb;
+          vec3 nightColor = texture2D(nightTexture, vUv).rgb;
+          vec3 borderTex  = texture2D(borderTexture, vUv).rgb;
+
+          dayColor   = saturateColor(dayColor,   1.25);
+          nightColor = saturateColor(nightColor, 1.4);
+
+          // ---- 기본 지구 색 (전체적으로 어두운 톤) ----
+          float lambert = max(ndotl, 0.0);
+          float dayLight = 0.28 + 1.0 * lambert;  // 예전 느낌처럼 조금 더 어둡게
+          vec3 baseDay   = dayColor * dayLight * dayFactor;
+
+          // 밤 바탕은 살짝만 보이도록
+          vec3 baseNight = dayColor * 0.05 * nightFactor;
+
+          // ---- 도시 불빛 (야경) ----
+          // night 텍스처를 따뜻한 노란색 발광으로 사용
+          vec3 warmNight = nightColor * vec3(2.0, 1.7, 1.25);
+          // ★ 여기 계수 5.0 → 이전보다 살짝 강하게
+          vec3 cityEmission = warmNight * nightFactor * 5.0;
+
+          vec3 color = baseDay + baseNight + cityEmission;
+
+          // 국경/해안선 살짝 강조
+          float borderGray = dot(borderTex, vec3(0.299, 0.587, 0.114));
+          float borderMask = smoothstep(0.6, 0.9, borderGray);
+          vec3 borderTint = vec3(0.9, 0.95, 1.0);
+          color = mix(color, borderTint, borderMask * 0.35);
+
+          // 전체 톤 : 배경은 어두운데 불빛은 또렷하게
+          color = clamp(color, 0.0, 1.0);
+          color = pow(color, vec3(0.9)); // 0.8 → 0.9 로 살짝 어둡게
+
+          gl_FragColor = vec4(color, 1.0);
+        }
+      `
+    });
+
+    const earth = new THREE.Mesh(geo, material);
+    globeGroup.add(earth);
+
+    const loader = new THREE.TextureLoader();
+    loader.load(
+      EARTH_DAY,
+      tex => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        uniforms.dayTexture.value = tex;
+      },
+      undefined,
+      err => console.error('day texture load error', err)
+    );
+    loader.load(
+      EARTH_NIGHT,
+      tex => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        uniforms.nightTexture.value = tex;
+      },
+      undefined,
+      err => console.error('night texture load error', err)
+    );
+    loader.load(
+      EARTH_BORDER,
+      tex => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        uniforms.borderTexture.value = tex;
+      },
+      undefined,
+      err => console.error('border texture load error', err)
     );
 
-    ws.onmessage = (event) => {
-      const payload = JSON.parse(event.data);
-      setEvents((current) => [payload, ...current].slice(0, 200));
-    };
+    
+    const starGeo = new THREE.SphereGeometry(30, 32, 32);
+    const starMat = new THREE.MeshBasicMaterial({
+      side: THREE.BackSide,
+      transparent: true
+    });
+    loader.load(
+      STARFIELD,
+      tex => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        starMat.map = tex;
+        starMat.needsUpdate = true;
+      },
+      undefined,
+      err => console.error('starfield texture load error', err)
+    );
+    const starMesh = new THREE.Mesh(starGeo, starMat);
+    scene.add(starMesh);
 
-    ws.onerror = (error) => {
-      console.error('WebSocket error', error);
+    
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.1;
+    controls.enablePan = false;
+    controls.minDistance = 2.2;
+    controls.maxDistance = 6;
+    controls.rotateSpeed = 0.5;
+    controls.zoomSpeed = 0.6;
+
+    let isUserInteracting = false;
+    controls.addEventListener('start', () => {
+      isUserInteracting = true;
+    });
+    controls.addEventListener('end', () => {
+      isUserInteracting = false;
+    });
+
+    let animationFrameId;
+    let lastTime = performance.now();
+
+    const animate = (time) => {
+      const dt = (time - lastTime) / 1000.0;
+      lastTime = time;
+
+      if (!isUserInteracting) {
+        globeGroup.rotation.y += AUTO_ROT_SPEED * dt;
+      }
+
+      controls.update();
+      renderer.render(scene, camera);
+      animationFrameId = requestAnimationFrame(animate);
     };
+    animationFrameId = requestAnimationFrame(animate);
+
+    const handleResize = () => {
+      const { clientWidth, clientHeight } = container;
+      camera.aspect = clientWidth / clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(clientWidth, clientHeight);
+    };
+    window.addEventListener('resize', handleResize);
 
     return () => {
-      ws.close();
+      cancelAnimationFrame(animationFrameId);
+      window.removeEventListener('resize', handleResize);
+      controls.dispose();
+      geo.dispose();
+      starGeo.dispose();
+      renderer.dispose();
+      if (container.contains(renderer.domElement)) {
+        container.removeChild(renderer.domElement);
+      }
     };
-  }, [targetIp, windowMinutes]);
+  }, []);
 
   return (
-    <div className="app">
-      <div className="controls">
-        <SearchBar targetIp={targetIp} onSubmit={setTargetIp} />
-        <label className="window-input">
-          <span>Minutes</span>
-          <input
-            type="number"
-            value={windowMinutes}
-            min={1}
-            max={120}
-            onChange={(event) => setWindowMinutes(Number(event.target.value))}
-          />
-        </label>
-      </div>
-
-      <div className="globe-wrapper">
-        <Globe
-          // 구글어스처럼 마우스로 드래그해서 회전 / 줌 가능
-          globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
-          bumpImageUrl="//unpkg.com/three-globe/example/img/earth-topology.png"
-          backgroundColor="#020617"
-          width={window.innerWidth}
-          height={window.innerHeight}
-          // 아크(공격 라인)
-          arcsData={arcsData}
-          arcStartLat="startLat"
-          arcStartLng="startLng"
-          arcEndLat="endLat"
-          arcEndLng="endLng"
-          arcColor={() => ['#1e90ff', '#ff4757']}
-          arcDashLength={0.5}
-          arcDashGap={0.4}
-          arcDashAnimateTime={1200}
-          arcLabel={(d) => `
-            <div>
-              <div><strong>Source:</strong> ${d.source_ip}</div>
-              <div><strong>Target:</strong> ${d.target_ip}</div>
-              <div><strong>Bytes:</strong> ${d.bytes_sent}</div>
-              ${
-                d.attack_type
-                  ? `<div><strong>Type:</strong> ${d.attack_type}</div>`
-                  : ''
-              }
-              <div><strong>Seen:</strong> ${new Date(
-                d.timestamp
-              ).toLocaleString()}</div>
-            </div>
-          `}
-          // 소스/타깃 포인트
-          pointsData={pointsData}
-          pointLat="lat"
-          pointLng="lng"
-          pointAltitude={0.05}
-          pointRadius={0.2}
-          pointColor={(p) => (p.kind === 'source' ? '#1e90ff' : '#ffa502')}
-          pointLabel={(p) =>
-            `<div>
-              <div><strong>${p.kind === 'source' ? 'Source' : 'Target'}</strong></div>
-              <div>${p.ip}</div>
-              ${
-                p.city || p.country
-                  ? `<div>${[p.city, p.country].filter(Boolean).join(', ')}</div>`
-                  : ''
-              }
-            </div>`
-          }
-        />
-      </div>
+    <div className="app-root">
+      <div ref={mountRef} className="globe-container" />
     </div>
   );
 }

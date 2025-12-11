@@ -1,13 +1,28 @@
-html, body, #root, .app {
-
-
-
-    .globe-wrapper {
-  height: 100vh;
-  width: 100vw;
-  background: #020617;
+/* frontend/src/styles.css */
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
 }
 
-.globe-wrapper canvas {
-  outline: none;
+body {
+  background: #000;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
+}
+
+.app-root {
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+  position: relative;
+  overflow: hidden;
+}
+
+.globe-container {
+  width: 100%;
+  height: 100%;
 }
